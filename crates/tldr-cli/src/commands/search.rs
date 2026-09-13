@@ -4,12 +4,15 @@
 //! (signature, callers, callees) for each BM25 match, minimizing round-trips
 //! for LLM agents exploring a codebase.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Args;
 
-use tldr_core::{enriched_search, EnrichedSearchOptions, Language, SearchMode};
+use tldr_core::{
+    build_project_call_graph, enriched_search, enriched_search_with_callgraph_cache,
+    EnrichedSearchOptions, Language, SearchMode,
+};
 
 use crate::output::{format_enriched_search_text, OutputFormat, OutputWriter};
 
@@ -102,8 +105,35 @@ impl SmartSearchArgs {
             search_mode,
         };
 
-        // Run enriched search
-        let report = enriched_search(&self.query, &self.path, language, options)?;
+        // Run enriched search. Call-graph enrichment costs ~60s to build, so
+        // cache it on disk on first use and reuse it afterwards. The cache
+        // file is the one `enriched_search_with_callgraph_cache` reads
+        // (`.tldr/cache/call_graph.json`).
+        let report = if options.include_callgraph {
+            let cache_path = self
+                .path
+                .join(".tldr")
+                .join("cache")
+                .join("call_graph.json");
+            if !cache_path.exists() {
+                let _ = write_callgraph_cache(&self.path, language, &cache_path);
+            }
+            if cache_path.exists() {
+                enriched_search_with_callgraph_cache(
+                    &self.query,
+                    &self.path,
+                    language,
+                    options,
+                    &cache_path,
+                )?
+            } else {
+                // Cache unavailable (e.g. read-only fs) — fall back to the
+                // uncached build rather than failing the search.
+                enriched_search(&self.query, &self.path, language, options)?
+            }
+        } else {
+            enriched_search(&self.query, &self.path, language, options)?
+        };
 
         // Output based on format
         if writer.is_text() {
@@ -115,4 +145,35 @@ impl SmartSearchArgs {
 
         Ok(())
     }
+}
+
+/// Build and persist the call-graph cache read by
+/// `enriched_search_with_callgraph_cache`.
+///
+/// Only `from_func`/`to_func` are consumed by that reader, but the envelope
+/// mirrors `warm.rs` (`from_file`/`to_file` included) so a single on-disk
+/// format serves both producers.
+fn write_callgraph_cache(root: &Path, language: Language, cache_path: &Path) -> Result<()> {
+    let graph = build_project_call_graph(root, language, None, true)?;
+    let edges: Vec<serde_json::Value> = graph
+        .edges()
+        .map(|e| {
+            serde_json::json!({
+                "from_file": e.src_file,
+                "from_func": e.src_func,
+                "to_file": e.dst_file,
+                "to_func": e.dst_func,
+            })
+        })
+        .collect();
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let envelope = serde_json::json!({
+        "edges": edges,
+        "languages": [language.as_str()],
+        "timestamp": chrono::Utc::now().timestamp(),
+    });
+    std::fs::write(cache_path, serde_json::to_string(&envelope)?)?;
+    Ok(())
 }
