@@ -3334,6 +3334,18 @@ pub fn find_references(
     // 20 (low)?".)
     let total_verified = references.len();
 
+    // Deterministic ordering before truncation (issue #74). Candidate
+    // collection/verification iterate HashMaps, so without a stable sort the
+    // tail dropped by `--limit` varied run-to-run — identical queries could
+    // return different references (silent, unreproducible data loss). Sort by
+    // (file, line, column) so the retained prefix is stable.
+    references.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then(a.line.cmp(&b.line))
+            .then(a.column.cmp(&b.column))
+    });
+
     // Apply limit if specified.
     // med-low-schema-cleanup-v1 (N6): record whether truncation actually
     // dropped any references and how many we ended up returning so the

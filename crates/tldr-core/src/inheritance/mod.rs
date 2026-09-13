@@ -64,7 +64,8 @@ use crate::ast::parser::ParserPool;
 use crate::walker::ProjectWalker;
 use crate::error::TldrError;
 use crate::types::{
-    BaseResolution, InheritanceEdge, InheritanceGraph, InheritanceReport, Language,
+    BaseResolution, InheritanceEdge, InheritanceGraph, InheritanceNode, InheritanceReport,
+    Language,
 };
 use crate::TldrResult;
 
@@ -215,11 +216,39 @@ pub fn extract_inheritance(
     report.scan_time_ms = start.elapsed().as_millis() as u64;
     report.diamonds = diamonds;
 
-    // Convert graph to edges and nodes for report
-    report.nodes = filtered_graph.nodes.values().cloned().collect();
-    report.edges = build_edges(&filtered_graph, path);
-    report.roots = filtered_graph.find_roots();
-    report.leaves = filtered_graph.find_leaves();
+    // Deterministic ordering (issue #74): the graph is backed by HashMaps, so
+    // node/edge/root/leaf order varied run-to-run, breaking diffing, caching
+    // and golden-file tests. Sort every collection by a stable key.
+    let mut nodes: Vec<InheritanceNode> = filtered_graph.nodes.values().cloned().collect();
+    nodes.sort_by(|a, b| a.name.cmp(&b.name).then(a.file.cmp(&b.file)));
+    report.nodes = nodes;
+
+    let mut edges = build_edges(&filtered_graph, path);
+    edges.sort_by(|a, b| {
+        a.child
+            .cmp(&b.child)
+            .then(a.parent.cmp(&b.parent))
+            .then(a.child_file.cmp(&b.child_file))
+    });
+    report.edges = edges;
+
+    report
+        .languages
+        .sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+    let mut roots = filtered_graph.find_roots();
+    roots.sort();
+    report.roots = roots;
+
+    let mut leaves = filtered_graph.find_leaves();
+    leaves.sort();
+    report.leaves = leaves;
+
+    report.diamonds.sort_by(|a, b| {
+        a.class_name
+            .cmp(&b.class_name)
+            .then(a.common_ancestor.cmp(&b.common_ancestor))
+    });
 
     Ok(report)
 }
