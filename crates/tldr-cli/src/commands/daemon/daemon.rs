@@ -14,7 +14,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -68,6 +68,22 @@ fn hash_str_args(parts: &[&str]) -> u64 {
 /// hint.
 pub(crate) fn resolve_language(language: Option<Language>) -> Language {
     language.unwrap_or(Language::Python)
+}
+
+/// Resolve the language for an analysis command, auto-detecting it from
+/// `root` when the client did not send an explicit hint.
+///
+/// `resolve_language` defaults to Python, which is wrong for every
+/// non-Python project: the daemon built a Python call graph, cached it, and
+/// returned an empty edge set — so `tldr calls` silently fell back to a local
+/// (slow) rebuild. Analysis handlers must use this root-aware variant.
+pub(crate) fn resolve_language_with_root(
+    language: Option<Language>,
+    root: &Path,
+) -> Language {
+    language
+        .or_else(|| Language::from_directory(root))
+        .unwrap_or(Language::Python)
 }
 
 /// Count the number of file nodes in a FileTree recursively.
@@ -365,7 +381,13 @@ impl TLDRDaemon {
 
             DaemonCommand::Warm { language } => {
                 let parsed = language.as_deref().and_then(|l| l.parse::<Language>().ok());
-                let lang = resolve_language(parsed);
+                // Canonicalise so the warmed keys match the absolute paths the
+                // CLI router sends for `calls`/`structure`/`tree`.
+                let warm_root = self
+                    .project
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.project.clone());
+                let lang = resolve_language_with_root(parsed, &warm_root);
 
                 let mut warmed = Vec::new();
                 let mut errors = Vec::new();
@@ -373,13 +395,22 @@ impl TLDRDaemon {
                 // 1. Warm call graph
                 let calls_key = QueryKey::new(
                     "calls",
-                    hash_str_args(&[&self.project.to_string_lossy()]),
+                    hash_str_args(&[&warm_root.to_string_lossy()]),
                     lang,
                 );
                 if self.cache.get::<serde_json::Value>(&calls_key).is_some() {
                     warmed.push("call_graph (cached)");
                 } else {
-                    match build_project_call_graph(&self.project, lang, None, true) {
+                    // Must use the same shape the `calls` CLI command expects;
+                    // caching the raw V1 graph (`{"edges":…}` only) here made
+                    // every warmed `calls` response fail to deserialize.
+                    match crate::commands::calls::compute_call_graph_output(
+                        &warm_root,
+                        lang,
+                        Some(lang),
+                        true,
+                        200,
+                    ) {
                         Ok(result) => {
                             let val = serde_json::to_value(&result).unwrap_or_default();
                             self.cache.insert(calls_key, &val, vec![]);
@@ -392,7 +423,7 @@ impl TLDRDaemon {
                 // 2. Warm code structure
                 let struct_key = QueryKey::new(
                     "structure",
-                    hash_str_args(&[&self.project.to_string_lossy(), ""]),
+                    hash_str_args(&[&warm_root.to_string_lossy(), ""]),
                     lang,
                 );
                 if self.cache.get::<serde_json::Value>(&struct_key).is_some() {
@@ -411,7 +442,7 @@ impl TLDRDaemon {
                 // 3. Warm file tree
                 let tree_key = QueryKey::new(
                     "tree",
-                    hash_str_args(&[&self.project.to_string_lossy()]),
+                    hash_str_args(&[&warm_root.to_string_lossy()]),
                     lang,
                 );
                 if self.cache.get::<serde_json::Value>(&tree_key).is_some() {
@@ -589,6 +620,7 @@ impl TLDRDaemon {
 
             DaemonCommand::Tree { path } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
+                let root = root.canonicalize().unwrap_or(root);
                 let root_str = root.to_string_lossy().to_string();
                 // File tree is language-agnostic; tag with default language.
                 let key = QueryKey::new(
@@ -651,7 +683,7 @@ impl TLDRDaemon {
                 language,
             } => {
                 let d = depth.unwrap_or(2);
-                let lang = resolve_language(language);
+                let lang = resolve_language_with_root(language, &self.project);
                 let key = QueryKey::new(
                     "context",
                     hash_str_args(&[&entry, &d.to_string()]),
@@ -785,13 +817,20 @@ impl TLDRDaemon {
 
             DaemonCommand::Calls { path, language } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
-                let lang = resolve_language(language);
+                let root = root.canonicalize().unwrap_or(root);
+                let lang = resolve_language_with_root(language, &root);
                 let root_str = root.to_string_lossy().to_string();
                 let key = QueryKey::new("calls", hash_str_args(&[&root_str]), lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                match build_project_call_graph(&root, lang, None, true) {
+                match crate::commands::calls::compute_call_graph_output(
+                    &root,
+                    lang,
+                    Some(lang),
+                    true,
+                    200,
+                ) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
                         self.cache.insert(key, &val, vec![]);
@@ -810,7 +849,7 @@ impl TLDRDaemon {
                 language,
             } => {
                 let d = depth.unwrap_or(3);
-                let lang = resolve_language(language);
+                let lang = resolve_language_with_root(language, &self.project);
                 let key = QueryKey::new(
                     "impact",
                     hash_str_args(&[&func, &d.to_string()]),
@@ -847,7 +886,8 @@ impl TLDRDaemon {
                 language,
             } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
-                let lang = resolve_language(language);
+                let root = root.canonicalize().unwrap_or(root);
+                let lang = resolve_language_with_root(language, &root);
                 let root_str = root.to_string_lossy().to_string();
                 let entry_str = entry.as_ref().map(|v| v.join(",")).unwrap_or_default();
                 let key = QueryKey::new(
@@ -907,7 +947,8 @@ impl TLDRDaemon {
 
             DaemonCommand::Arch { path, language } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
-                let lang = resolve_language(language);
+                let root = root.canonicalize().unwrap_or(root);
+                let lang = resolve_language_with_root(language, &root);
                 let root_str = root.to_string_lossy().to_string();
                 let key = QueryKey::new("arch", hash_str_args(&[&root_str]), lang);
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
@@ -974,7 +1015,8 @@ impl TLDRDaemon {
                 language,
             } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
-                let lang = resolve_language(language);
+                let root = root.canonicalize().unwrap_or(root);
+                let lang = resolve_language_with_root(language, &root);
                 let root_str = root.to_string_lossy().to_string();
                 let key = QueryKey::new(
                     "importers",
@@ -1012,7 +1054,7 @@ impl TLDRDaemon {
                 git: _,
                 language,
             } => {
-                let lang = resolve_language(language);
+                let lang = resolve_language_with_root(language, &self.project);
                 let files_str = files
                     .as_ref()
                     .map(|v| {

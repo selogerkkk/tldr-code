@@ -154,10 +154,15 @@ pub async fn is_daemon_running_async(project: &Path) -> bool {
 // =============================================================================
 
 /// Build JSON params with optional path.
+///
+/// The path is canonicalised before being sent: the daemon keys its cache on
+/// the absolute path (mirroring `warm`), so sending a relative path like `.`
+/// produced a different QueryKey and guaranteed a cache miss.
 pub fn params_with_path(path: Option<&Path>) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     if let Some(p) = path {
-        obj.insert("path".to_string(), serde_json::json!(p));
+        let resolved = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        obj.insert("path".to_string(), serde_json::json!(resolved));
     }
     serde_json::Value::Object(obj)
 }
