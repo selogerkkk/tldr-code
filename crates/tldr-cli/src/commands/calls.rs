@@ -339,3 +339,38 @@ pub(crate) fn compute_call_graph_output(
         shown_edges,
     })
 }
+
+/// Re-apply the `max_items` truncation to an already-built output.
+///
+/// Used by the daemon to cache a full graph once (for `impact`) and derive the
+/// truncated `calls` shape from it without rebuilding.
+pub(crate) fn truncate_output(mut output: CallGraphOutput, max_items: usize) -> CallGraphOutput {
+    output.total_edges = output.edges.len();
+    output.truncated = output.total_edges > max_items;
+    if output.edges.len() > max_items {
+        output.edges.sort_by(|a, b| {
+            let a_key = format!("{}:{}", a.src_file.display(), a.src_func);
+            let b_key = format!("{}:{}", b.src_file.display(), b.src_func);
+            a_key.cmp(&b_key)
+        });
+        output.edges.truncate(max_items);
+    }
+    output.shown_edges = output.edges.len();
+    output
+}
+
+/// Rebuild the V1 call graph consumed by `impact_analysis` from a cached
+/// `CallGraphOutput`, so `impact` can reuse the graph `warm`/`calls` built
+/// instead of paying another ~60s cold build.
+pub(crate) fn project_graph_from_output(output: &CallGraphOutput) -> tldr_core::ProjectCallGraph {
+    let mut graph = tldr_core::ProjectCallGraph::new();
+    for e in &output.edges {
+        graph.add_edge(tldr_core::CallEdge {
+            src_file: e.src_file.clone(),
+            src_func: e.src_func.clone(),
+            dst_file: e.dst_file.clone(),
+            dst_func: e.dst_func.clone(),
+        });
+    }
+    graph
+}

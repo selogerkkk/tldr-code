@@ -401,18 +401,28 @@ impl TLDRDaemon {
                 if self.cache.get::<serde_json::Value>(&calls_key).is_some() {
                     warmed.push("call_graph (cached)");
                 } else {
-                    // Must use the same shape the `calls` CLI command expects;
-                    // caching the raw V1 graph (`{"edges":…}` only) here made
-                    // every warmed `calls` response fail to deserialize.
+                    // Build the full graph once. The `calls` command's
+                    // truncated shape is derived from it, and `impact` reuses
+                    // it via the `callgraph` key to avoid its own cold build.
                     match crate::commands::calls::compute_call_graph_output(
                         &warm_root,
                         lang,
                         Some(lang),
                         true,
-                        200,
+                        usize::MAX,
                     ) {
                         Ok(result) => {
-                            let val = serde_json::to_value(&result).unwrap_or_default();
+                            let full_key = QueryKey::new(
+                                "callgraph",
+                                hash_str_args(&[&warm_root.to_string_lossy()]),
+                                lang,
+                            );
+                            let full_val = serde_json::to_value(&result).unwrap_or_default();
+                            self.cache.insert(full_key, &full_val, vec![]);
+
+                            let truncated =
+                                crate::commands::calls::truncate_output(result, 200);
+                            let val = serde_json::to_value(&truncated).unwrap_or_default();
                             self.cache.insert(calls_key, &val, vec![]);
                             warmed.push("call_graph");
                         }
@@ -858,14 +868,46 @@ impl TLDRDaemon {
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
                 }
-                let graph = match build_project_call_graph(&self.project, lang, None, true) {
-                    Ok(g) => g,
-                    Err(e) => {
-                        return DaemonResponse::Error {
-                            status: "error".to_string(),
-                            error: e.to_string(),
+                // Reuse the full graph warmed for `calls` rather than paying
+                // another cold build.
+                let warm_root = self
+                    .project
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.project.clone());
+                let full_key = QueryKey::new(
+                    "callgraph",
+                    hash_str_args(&[&warm_root.to_string_lossy()]),
+                    lang,
+                );
+                let graph = match self.cache.get::<serde_json::Value>(&full_key) {
+                    Some(v) => {
+                        match serde_json::from_value::<crate::commands::calls::CallGraphOutput>(v) {
+                            Ok(out) => crate::commands::calls::project_graph_from_output(&out),
+                            Err(_) => match build_project_call_graph(
+                                &self.project,
+                                lang,
+                                None,
+                                true,
+                            ) {
+                                Ok(g) => g,
+                                Err(e) => {
+                                    return DaemonResponse::Error {
+                                        status: "error".to_string(),
+                                        error: e.to_string(),
+                                    }
+                                }
+                            },
                         }
                     }
+                    None => match build_project_call_graph(&self.project, lang, None, true) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            return DaemonResponse::Error {
+                                status: "error".to_string(),
+                                error: e.to_string(),
+                            }
+                        }
+                    },
                 };
                 match impact_analysis(&graph, &func, d, None) {
                     Ok(result) => {
