@@ -242,8 +242,14 @@ fn collect_source_files(path: &Path, lang: Option<Language>) -> Vec<PathBuf> {
     // default exclude list (vendor/, node_modules/, target/, ...) are honored.
     // A raw `walkdir::WalkDir` only skipped hidden entries and pulled in
     // `vendor/` on projects that commit their dependency tree, blowing up both
-    // scan time and output size.
-    for entry in ProjectWalker::new(path).iter() {
+    // scan time and output size. Pass the language hint so the JS/TS-preserved
+    // subset of the default excludes (build/, dist/, out/, bin/, obj/) is not
+    // applied when the caller targets JavaScript/TypeScript.
+    let walker = match lang {
+        Some(language) => ProjectWalker::new(path).lang_hint(language),
+        None => ProjectWalker::new(path),
+    };
+    for entry in walker.iter() {
         let entry_path = entry.path();
 
         // Skip non-files
