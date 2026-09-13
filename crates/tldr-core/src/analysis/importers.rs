@@ -199,6 +199,69 @@ fn module_matches(import_module: &str, target: &str, language: Language) -> bool
             }
             false
         }
+        Language::Php => {
+            // PHP imports are backslash-separated namespaces:
+            //   use App\Services\Hotel\Responses\DetailHotelResponse;
+            // A basename query ("DetailHotelResponse") must match the FQN's
+            // trailing segment. The exact-equality fallback previously
+            // returned 0 hits for it. (cluster CL-9 / IT3-php-01)
+            if import_module == target {
+                return true;
+            }
+            let import_norm = import_module.trim_start_matches('\\');
+            let target_norm = target.trim_start_matches('\\');
+            if import_norm == target_norm {
+                return true;
+            }
+            if !target_norm.contains('\\')
+                && import_norm.ends_with(&format!("\\{}", target_norm))
+            {
+                return true;
+            }
+            // Namespaced target, shorter import (subnamespace usage).
+            if import_norm.contains('\\') && target_norm.starts_with(&format!("{}\\", import_norm))
+            {
+                return true;
+            }
+            false
+        }
+        Language::Ruby => {
+            // `require "a/b/c"` and `require_relative "./a/b"` — exact match,
+            // plus a trailing-segment match for a single-segment target.
+            // (cluster CL-9 / IT3-ruby-14)
+            let norm = |s: &str| s.replace('\\', "/");
+            let im = norm(import_module);
+            let tg = norm(target);
+            if im == tg {
+                return true;
+            }
+            if !tg.contains('/') {
+                let basename = |s: &str| -> String {
+                    s.trim_end_matches(".rb")
+                        .trim_start_matches("./")
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(s)
+                        .to_string()
+                };
+                return basename(&im) == basename(&tg);
+            }
+            false
+        }
+        Language::Lua | Language::Luau => {
+            // `require("a.b.c")` / `require("a/b/c")` — dots and slashes are
+            // both package separators. Single-segment targets fall back to a
+            // trailing-segment match. (cluster CL-9 / IT3-luau-15)
+            let im = import_module.replace(['/', '\\'], ".");
+            let tg = target.replace(['/', '\\'], ".");
+            if im == tg {
+                return true;
+            }
+            if !tg.contains('.') && im.rsplit('.').next() == Some(tg.as_str()) {
+                return true;
+            }
+            false
+        }
         _ => import_module == target,
     }
 }
@@ -376,5 +439,37 @@ mod tests {
         let (line, stmt) = find_import_line(&lines, "services.auth", true, Language::Python);
         assert_eq!(line, 4);
         assert!(stmt.contains("services.auth"));
+    }
+
+    #[test]
+    fn test_module_matches_php_namespace_and_basename() {
+        let fq = "App\\Services\\Hotel\\Responses\\DetailHotelResponse";
+
+        // FQN query still matches.
+        assert!(module_matches(fq, fq, Language::Php));
+        // Basename query matches the FQN's trailing segment (IT3-php-01).
+        assert!(module_matches(fq, "DetailHotelResponse", Language::Php));
+        // Leading backslash is tolerated.
+        assert!(module_matches(fq, "\\DetailHotelResponse", Language::Php));
+        // Partial trailing segments must NOT match.
+        assert!(!module_matches(fq, "HotelResponse", Language::Php));
+        assert!(!module_matches(fq, "Response", Language::Php));
+    }
+
+    #[test]
+    fn test_module_matches_ruby_relative_basename() {
+        assert!(module_matches("./nested/thing", "thing", Language::Ruby));
+        assert!(module_matches("nested/thing.rb", "thing", Language::Ruby));
+        assert!(module_matches("thing", "thing", Language::Ruby));
+        assert!(!module_matches("nested/thing", "other", Language::Ruby));
+    }
+
+    #[test]
+    fn test_module_matches_lua_path_separators() {
+        assert!(module_matches("a.b.c", "c", Language::Lua));
+        assert!(module_matches("a/b/c", "c", Language::Luau));
+        assert!(module_matches("a.b.c", "a.b.c", Language::Lua));
+        // Multi-segment targets must match exactly, not by trailing segment.
+        assert!(!module_matches("a.b.c", "b.c", Language::Lua));
     }
 }
