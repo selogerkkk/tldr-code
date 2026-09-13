@@ -118,18 +118,17 @@ impl SmartSearchArgs {
             if !cache_path.exists() {
                 let _ = write_callgraph_cache(&self.path, language, &cache_path);
             }
-            if cache_path.exists() {
-                enriched_search_with_callgraph_cache(
-                    &self.query,
-                    &self.path,
-                    language,
-                    options,
-                    &cache_path,
-                )?
-            } else {
-                // Cache unavailable (e.g. read-only fs) — fall back to the
+            match enriched_search_with_callgraph_cache(
+                &self.query,
+                &self.path,
+                language,
+                options.clone(),
+                &cache_path,
+            ) {
+                Ok(report) => report,
+                // Cache missing, partial, or malformed — fall back to the
                 // uncached build rather than failing the search.
-                enriched_search(&self.query, &self.path, language, options)?
+                Err(_) => enriched_search(&self.query, &self.path, language, options)?,
             }
         } else {
             enriched_search(&self.query, &self.path, language, options)?
@@ -174,6 +173,10 @@ fn write_callgraph_cache(root: &Path, language: Language, cache_path: &Path) -> 
         "languages": [language.as_str()],
         "timestamp": chrono::Utc::now().timestamp(),
     });
-    std::fs::write(cache_path, serde_json::to_string(&envelope)?)?;
+    // Write via a same-directory temp file and rename so an interrupted write
+    // can never leave a partial cache file behind for later searches to trip on.
+    let tmp_path = cache_path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_string(&envelope)?)?;
+    std::fs::rename(&tmp_path, cache_path)?;
     Ok(())
 }
