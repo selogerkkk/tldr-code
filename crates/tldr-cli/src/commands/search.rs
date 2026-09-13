@@ -115,6 +115,11 @@ impl SmartSearchArgs {
                 .join(".tldr")
                 .join("cache")
                 .join("call_graph.json");
+            // Drop a stale cache before using it: if any source file is newer
+            // than the cache, the enrichment would describe the pre-edit tree.
+            if cache_path.exists() && !cache_is_fresh(&self.path, &cache_path) {
+                let _ = std::fs::remove_file(&cache_path);
+            }
             if !cache_path.exists() {
                 let _ = write_callgraph_cache(&self.path, language, &cache_path);
             }
@@ -179,4 +184,63 @@ fn write_callgraph_cache(root: &Path, language: Language, cache_path: &Path) -> 
     std::fs::write(&tmp_path, serde_json::to_string(&envelope)?)?;
     std::fs::rename(&tmp_path, cache_path)?;
     Ok(())
+}
+
+/// Whether the on-disk call-graph cache is newer than every source file.
+///
+/// The cache is only written by `search`; nothing invalidates it on edit, so a
+/// stale file would make enrichment describe the pre-edit tree. The daemon has
+/// its own invalidation (#51); this covers the CLI-side cache.
+fn cache_is_fresh(root: &Path, cache_path: &Path) -> bool {
+    let cache_time = match std::fs::metadata(cache_path).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    match newest_source_mtime(root) {
+        Some(newest) => newest <= cache_time,
+        // No source files found — nothing to invalidate against.
+        None => true,
+    }
+}
+
+/// Newest modification time across the project's source files.
+///
+/// Uses the shared walker so `.gitignore` and the default excludes apply
+/// (the `.tldr/` cache directory is hidden and therefore skipped).
+fn newest_source_mtime(root: &Path) -> Option<std::time::SystemTime> {
+    use tldr_core::walker::ProjectWalker;
+    ProjectWalker::new(root)
+        .iter()
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .filter_map(|e| e.metadata().ok())
+        .filter_map(|m| m.modified().ok())
+        .max()
+}
+
+#[cfg(test)]
+mod cache_freshness_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn cache_is_fresh_tracks_source_mtime() {
+        let dir = std::env::temp_dir().join(format!("tldr-freshness-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let src = dir.join("a.php");
+        fs::write(&src, "<?php class A {}").unwrap();
+        let cache = dir.join("call_graph.json");
+        fs::write(&cache, "{}").unwrap();
+
+        // Cache written after the source => fresh.
+        assert!(cache_is_fresh(&dir, &cache));
+
+        // Source touched after the cache => stale.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(&src, "<?php class A { /* edit */ }").unwrap();
+        assert!(!cache_is_fresh(&dir, &cache));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
