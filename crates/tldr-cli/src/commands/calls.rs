@@ -13,7 +13,7 @@ use tldr_core::callgraph::cross_file_types::CallType;
 use tldr_core::callgraph::{build_project_call_graph_v2, BuildConfig};
 use tldr_core::Language;
 
-use crate::commands::daemon_router::{params_with_path, try_daemon_route};
+use crate::commands::daemon_router::{params_with_calls, try_daemon_route};
 use crate::output::{format_calls_dot, DotCallEdge, OutputFormat, OutputWriter};
 
 /// Build and display cross-file call graph
@@ -31,7 +31,7 @@ pub struct CallsArgs {
     #[arg(long, default_value = "true")]
     pub respect_ignore: bool,
 
-    /// Maximum items (edges) to include in output (default: 200)
+    /// Maximum items (edges and nodes) to include in output (default: 200)
     #[arg(long, default_value = "200")]
     pub max_items: usize,
 }
@@ -66,7 +66,8 @@ pub(crate) struct CallGraphOutput {
     /// when `false` — so schema consumers do not need to handle the
     /// absent-key case. Previously elided via `skip_serializing_if`, but
     /// downstream tooling (and `references`, `dead`, `dice`, etc.) all
-    /// treat `truncated` as a stable boolean key.
+    /// treat `truncated` as a stable boolean key. Set when either the edge
+    /// list or the node list exceeds `max_items`.
     #[serde(default)]
     truncated: bool,
     /// Total number of edges before truncation
@@ -114,7 +115,12 @@ impl CallsArgs {
         if let Some(output) = try_daemon_route::<CallGraphOutput>(
             &self.path,
             "calls",
-            params_with_path(Some(&self.path)),
+            params_with_calls(
+                &self.path,
+                self.lang.map(|l| l.as_str()),
+                self.respect_ignore,
+                self.max_items,
+            ),
         ) {
             // Output based on format
             if writer.is_text() {
@@ -327,14 +333,21 @@ pub(crate) fn compute_call_graph_output(
             node_set.insert(format!("{}:{}", rel.display(), qualified));
         }
     }
-    let nodes: Vec<String> = node_set.into_iter().collect();
+    let mut nodes: Vec<String> = node_set.into_iter().collect();
+    // Cap nodes with the same `max_items` budget as edges. Repo-wide `calls`
+    // otherwise returned every function in the project (20k+ nodes / >500k
+    // tokens) because `--max-items` only limited edges, not the node list.
+    let nodes_truncated = nodes.len() > max_items;
+    if nodes_truncated {
+        nodes.truncate(max_items);
+    }
 
     Ok(CallGraphOutput {
         root: path.to_path_buf(),
         language: detected_language,
         nodes,
         edges,
-        truncated,
+        truncated: truncated || nodes_truncated,
         total_edges,
         shown_edges,
     })
@@ -346,7 +359,7 @@ pub(crate) fn compute_call_graph_output(
 /// truncated `calls` shape from it without rebuilding.
 pub(crate) fn truncate_output(mut output: CallGraphOutput, max_items: usize) -> CallGraphOutput {
     output.total_edges = output.edges.len();
-    output.truncated = output.total_edges > max_items;
+    let edges_truncated = output.total_edges > max_items;
     if output.edges.len() > max_items {
         output.edges.sort_by(|a, b| {
             let a_key = format!("{}:{}", a.src_file.display(), a.src_func);
@@ -356,6 +369,12 @@ pub(crate) fn truncate_output(mut output: CallGraphOutput, max_items: usize) -> 
         output.edges.truncate(max_items);
     }
     output.shown_edges = output.edges.len();
+
+    let nodes_truncated = output.nodes.len() > max_items;
+    if nodes_truncated {
+        output.nodes.truncate(max_items);
+    }
+    output.truncated = edges_truncated || nodes_truncated;
     output
 }
 

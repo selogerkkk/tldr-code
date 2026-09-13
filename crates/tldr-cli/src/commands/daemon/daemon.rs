@@ -395,7 +395,7 @@ impl TLDRDaemon {
                 // 1. Warm call graph
                 let calls_key = QueryKey::new(
                     "calls",
-                    hash_str_args(&[&warm_root.to_string_lossy()]),
+                    hash_str_args(&[&warm_root.to_string_lossy(), "true", "200"]),
                     lang,
                 );
                 if self.cache.get::<serde_json::Value>(&calls_key).is_some() {
@@ -453,7 +453,9 @@ impl TLDRDaemon {
                 let tree_key = QueryKey::new(
                     "tree",
                     hash_str_args(&[&warm_root.to_string_lossy()]),
-                    lang,
+                    // File tree is language-agnostic; the Tree handler looks it
+                    // up under this same default, so both must agree.
+                    resolve_language(None),
                 );
                 if self.cache.get::<serde_json::Value>(&tree_key).is_some() {
                     warmed.push("file_tree (cached)");
@@ -825,21 +827,47 @@ impl TLDRDaemon {
                 }
             }
 
-            DaemonCommand::Calls { path, language } => {
+            DaemonCommand::Calls {
+                path,
+                language,
+                respect_ignore,
+                max_items,
+            } => {
                 let root = path.unwrap_or_else(|| self.project.clone());
                 let root = root.canonicalize().unwrap_or(root);
                 let lang = resolve_language_with_root(language, &root);
                 let root_str = root.to_string_lossy().to_string();
-                let key = QueryKey::new("calls", hash_str_args(&[&root_str]), lang);
+                // Request-specific key: every input that changes the graph must
+                // be hashed, otherwise differently-configured calls collide.
+                let key = QueryKey::new(
+                    "calls",
+                    hash_str_args(&[
+                        &root_str,
+                        &respect_ignore.to_string(),
+                        &max_items.to_string(),
+                    ]),
+                    lang,
+                );
                 if let Some(cached) = self.cache.get::<serde_json::Value>(&key) {
                     return DaemonResponse::Result(cached);
+                }
+                // Prefer the full graph `warm` built (if any), then truncate it
+                // to this request's budget instead of rebuilding.
+                let full_key = QueryKey::new("callgraph", hash_str_args(&[&root_str]), lang);
+                if let Some(full) = self.cache.get::<serde_json::Value>(&full_key).and_then(|v| {
+                    serde_json::from_value::<crate::commands::calls::CallGraphOutput>(v).ok()
+                }) {
+                    let output = crate::commands::calls::truncate_output(full, max_items);
+                    let val = serde_json::to_value(&output).unwrap_or_default();
+                    self.cache.insert(key, &val, vec![]);
+                    return DaemonResponse::Result(val);
                 }
                 match crate::commands::calls::compute_call_graph_output(
                     &root,
                     lang,
                     Some(lang),
-                    true,
-                    200,
+                    respect_ignore,
+                    max_items,
                 ) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
@@ -1799,6 +1827,8 @@ mod tests {
             .handle_command(DaemonCommand::Calls {
                 path: None,
                 language: None,
+                respect_ignore: true,
+                max_items: 200,
             })
             .await;
 
