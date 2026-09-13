@@ -418,12 +418,12 @@ impl TLDRDaemon {
                                 lang,
                             );
                             let full_val = serde_json::to_value(&result).unwrap_or_default();
-                            self.cache.insert(full_key, &full_val, vec![]);
+                            self.cache.insert(full_key, &full_val, vec![super::salsa::PROJECT_WIDE_DEP]);
 
                             let truncated =
                                 crate::commands::calls::truncate_output(result, 200);
                             let val = serde_json::to_value(&truncated).unwrap_or_default();
-                            self.cache.insert(calls_key, &val, vec![]);
+                            self.cache.insert(calls_key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                             warmed.push("call_graph");
                         }
                         Err(e) => errors.push(format!("call_graph: {}", e)),
@@ -442,7 +442,7 @@ impl TLDRDaemon {
                     match get_code_structure(&self.project, lang, 0, None) {
                         Ok(result) => {
                             let val = serde_json::to_value(&result).unwrap_or_default();
-                            self.cache.insert(struct_key, &val, vec![]);
+                            self.cache.insert(struct_key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                             warmed.push("structure");
                         }
                         Err(e) => errors.push(format!("structure: {}", e)),
@@ -464,7 +464,7 @@ impl TLDRDaemon {
                         Ok(result) => {
                             let file_count = count_tree_files(&result);
                             let val = serde_json::to_value(&result).unwrap_or_default();
-                            self.cache.insert(tree_key, &val, vec![]);
+                            self.cache.insert(tree_key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                             *self.indexed_files.write().await = file_count;
                             warmed.push("file_tree");
                         }
@@ -591,7 +591,7 @@ impl TLDRDaemon {
                 match tldr_search(&pattern, &self.project, None, 2, max, 1000, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        self.cache.insert(key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -646,7 +646,7 @@ impl TLDRDaemon {
                 match get_file_tree(&root, None, true, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        self.cache.insert(key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -679,7 +679,7 @@ impl TLDRDaemon {
                 match get_code_structure(&path, language, 0, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        self.cache.insert(key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -707,7 +707,7 @@ impl TLDRDaemon {
                 match get_relevant_context(&self.project, &entry, d, lang, true, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        self.cache.insert(key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -859,7 +859,7 @@ impl TLDRDaemon {
                 }) {
                     let output = crate::commands::calls::truncate_output(full, max_items);
                     let val = serde_json::to_value(&output).unwrap_or_default();
-                    self.cache.insert(key, &val, vec![]);
+                    self.cache.insert(key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                     return DaemonResponse::Result(val);
                 }
                 match crate::commands::calls::compute_call_graph_output(
@@ -871,7 +871,7 @@ impl TLDRDaemon {
                 ) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        self.cache.insert(key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -940,7 +940,7 @@ impl TLDRDaemon {
                 match impact_analysis(&graph, &func, d, None) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        self.cache.insert(key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1005,7 +1005,7 @@ impl TLDRDaemon {
                 match dead_code_analysis(&graph, &all_functions, entry_refs) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        self.cache.insert(key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1036,7 +1036,7 @@ impl TLDRDaemon {
                 match architecture_analysis(&graph) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        self.cache.insert(key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1099,7 +1099,7 @@ impl TLDRDaemon {
                 match find_importers(&root, &module, lang) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        self.cache.insert(key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1146,7 +1146,7 @@ impl TLDRDaemon {
                 match change_impact(&self.project, changed.as_deref(), lang) {
                     Ok(result) => {
                         let val = serde_json::to_value(&result).unwrap_or_default();
-                        self.cache.insert(key, &val, vec![]);
+                        self.cache.insert(key, &val, vec![super::salsa::PROJECT_WIDE_DEP]);
                         DaemonResponse::Result(val)
                     }
                     Err(e) => DaemonResponse::Error {
@@ -1196,6 +1196,11 @@ impl TLDRDaemon {
         // Invalidate cache entries for this file
         let file_hash = super::salsa::hash_path(&file);
         self.cache.invalidate_by_input(file_hash);
+        // Project-wide results depend on the whole file set, so a change to
+        // any file must drop them too (issue #51). Otherwise `calls`/`impact`/
+        // `dead`/`importers` keep serving results from the pre-edit tree.
+        self.cache
+            .invalidate_by_input(super::salsa::PROJECT_WIDE_DEP);
 
         // Invalidate semantic index so it rebuilds on next query
         #[cfg(feature = "semantic")]

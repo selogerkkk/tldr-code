@@ -63,6 +63,19 @@ const CACHE_VERSION: u8 = 1;
 /// in `QueryCache::load_from_file`.
 pub const CACHE_SCHEMA_VERSION: u32 = 2;
 
+/// Synthetic input hash for project-wide analysis entries.
+///
+/// Project-wide results (call graph, impact, dead code, importers, search, …)
+/// depend on the whole file set, not on one path. Registering them against
+/// this sentinel lets `Notify` invalidate all of them on any file change
+/// without tracking every scanned path individually. Per-file entries keep
+/// their own `hash_path` dependency.
+///
+/// Fixes the stale-results half of issue #51: pre-fix these entries were
+/// inserted with an empty dependency list and were therefore never
+/// invalidated after a file edit.
+pub const PROJECT_WIDE_DEP: u64 = 0x5052_4F4A_5749_4445; // "PROJ_WIDE"
+
 // =============================================================================
 // Core Types
 // =============================================================================
