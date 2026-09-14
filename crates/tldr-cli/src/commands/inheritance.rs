@@ -58,10 +58,26 @@ pub struct InheritanceArgs {
     #[arg(long)]
     pub no_external: bool,
 
+    /// Emit the full repo-wide hierarchy even when it is very large.
+    ///
+    /// Without this, `inheritance` refuses to print a result with more than
+    /// `MAX_SAFE_NODES` classes. A repo-wide graph is ~19k nodes / ~500k
+    /// tokens of JSON, which silently blows up an agent's context (and cost).
+    /// Scope the path (e.g. `inheritance app/Services`) or use `--class`.
+    #[arg(long)]
+    pub allow_large: bool,
+
     /// Output format override (backwards compatibility, prefer global --format/-f)
     #[arg(long = "output", short = 'o', hide = true, value_parser = parse_inheritance_format)]
     pub output: Option<InheritanceFormat>,
 }
+
+/// Maximum classes `inheritance` will print without `--allow-large`.
+///
+/// Chosen well above any realistic scoped query (a directory/module) and well
+/// below a whole-repo graph (~19k nodes), so the guard only ever fires on the
+/// accidental `tldr inheritance .` that would otherwise cost ~500k tokens.
+const MAX_SAFE_NODES: usize = 2000;
 
 /// Inheritance-specific output formats (includes DOT)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +120,19 @@ impl InheritanceArgs {
 
         // Run analysis
         let report = extract_inheritance(&self.path, self.lang, &options)?;
+
+        // Hard guard against the accidental repo-wide graph (~19k classes /
+        // ~500k tokens of JSON), which silently blows up an agent's context and
+        // cost. `--class` already narrows the output, so only plain calls are
+        // gated. `--allow-large` opts out explicitly.
+        if !self.allow_large && self.class.is_none() && report.nodes.len() > MAX_SAFE_NODES {
+            anyhow::bail!(
+                "inheritance matched {} classes (> {MAX_SAFE_NODES}). Refusing to emit a \
+                 repo-wide hierarchy. Scope the path (e.g. `tldr inheritance app/Services`), \
+                 use `--class <Name>`, or pass --allow-large to override.",
+                report.nodes.len(),
+            );
+        }
 
         // Determine output format
         // surface-gaps-v1 (BUG-19): honor the global `--format dot` flag in
